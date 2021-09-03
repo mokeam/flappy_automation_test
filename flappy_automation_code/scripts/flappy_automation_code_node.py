@@ -1,179 +1,475 @@
 #!/usr/bin/env python
-import rospy
 import numpy as np
-from sensor_msgs.msg import LaserScan
+
+import rospy
 from geometry_msgs.msg import Vector3
-import math
-
-#Parameters
-bubble_radius = 12
-scan_threshold = 6.0
-gap_threshold = 1.9
-increment = 0
-minimum_steering_angle = -45
-previous_goal_steering_angle = 0
-current_goal_steering_angle = 0
-K_x = 1.2 
-K_y = 0.004
-K_acc = 12
-
-# Publisher for sending acceleration commands to flappy bird
-pub_acc_cmd = rospy.Publisher('/flappy_acc', Vector3, queue_size=1)
-
-def initNode():
-    # Here we initialize our node running the automation code
-    rospy.init_node('flappy_automation_code', anonymous=True)
-
-    # Subscribe to topics for velocity and laser scan from Flappy Bird game
-    rospy.Subscriber("/flappy_vel", Vector3, velCallback)
-    rospy.Subscriber("/flappy_laser_scan", LaserScan, laserScanCallback)
-
-    # Ros spin to prevent program from exiting
-    rospy.spin()
-
-def velCallback(msg):
-    # msg has the format of geometry_msgs::Vector3
-    # Example of publishing acceleration command on velocity velCallback
-    global current_goal_steering_angle
-    global previous_goal_steering_angle
-   
-    #Calculating the angle error 
-    error_theta = previous_goal_steering_angle
-
-    #Acceleration desired along x and y based on the obstacles ahead
-    R_vx = K_x*np.exp(-0.02*np.abs(error_theta)*2) ###
-    R_vy = K_y*error_theta
-
-    #Error from the des10ired linear velocity
-    E_vx = R_vx - msg.x
-    E_vy = R_vy - msg.y
-    # Multiplying with another P gain for controlled motion
-    pub_acc_cmd.publish(K_acc*E_vx,K_acc*E_vy,0)
+from sensor_msgs.msg import LaserScan
 
 
-def preprocess_lidar(ranges):
-    """ Preprocess the LiDAR scan array.
+##===================== FLAPPY BIRD CODE STRUCTURE ==============##
+# Transitions
+
+# States
+#### Go_Up
+#### Go_Down
+#### Go_Through
+#### Adjust
+
+# Finite State Machine
+
+# Character
+#### Flappy_Bird
+
+# Main Code
+
+##===================== TRANSITIONS =====================##
+class Transition(object):
+    """The Transition object is responsible for executing
+    transitions from one state to another.
     """
-    global scan_threshold
-    proc_ranges = []
-    # print(ranges)
-    for i in range(len(ranges)):
-        if math.isnan(ranges[i]):
-            proc_ranges.append(0)
-        elif ranges[i] > scan_threshold:
-            proc_ranges.append(scan_threshold)
+
+    def __init__(self, to_state):
+        self.to_state = to_state
+
+    def execute(self):
+        pass
+
+
+##===================== STATES  =====================##
+class State(object):
+    """The State object is a flappy bird super class that contains all
+     the methods needed by all the available states such as the
+     Go_Up State, Go_Down State, Go_Through State and Adjust State.
+     """
+
+    def __init__(self, FSM):
+        self.FSM = FSM
+        self.x_position, self.y_position = 0, -16
+        self.normalizer = 3.54999995
+        self.err_x_prev, self.err_y_prev, self.err_vx_prev, self.err_vy_prev = 0, 0, 0, 0
+        self.Kvx_p, self.Kvy_p, self.Kvx_d, self.Kvy_d = 0.0, 0.0, 0.0, 0.0
+        self.Kax_p, self.Kay_p, self.Kax_d, self.Kay_d = 0.0, 0.0, 0.0, 0.0
+        self.vx, self.vy = 0, 0
+        self.ranges = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        self.acc = Vector3(0, 0, 0)
+        self.upper_range = [[0.0, 0.0, 0.0, 0.0]]
+        self.lower_range = [[0.0, 0.0, 0.0, 0.0]]
+        self.primary = [[0.0, 0.0]]
+        self.upper_range_sum = 0.0
+        self.lower_range_sum = 0.0
+        self.primary_sum = 0.0
+        self.flappy_vel = rospy.Subscriber("/flappy_vel", Vector3, self.velocity_callback)
+        self.laser_scan = rospy.Subscriber("/flappy_laser_scan", LaserScan, self.laser_scan_callback)
+        self.pub_acc_cmd = rospy.Publisher('/flappy_acc', Vector3, queue_size=1)
+
+    def velocity_callback(self, msg):
+        """The callback to receive velocity data and estimate the position.
+
+        :param msg: velocity data
+
+        :returns: None
+        """
+        self.vx = msg.x
+        self.vy = msg.y
+        self.estimate_position()
+
+    def laser_scan_callback(self, msg):
+        """The callback to receive and preprocess laser scan data.
+
+        :param msg: laser scan data
+
+        :returns: None
+        """
+        self.ranges = np.array(msg.ranges) / self.normalizer
+        self.upper_range = self.ranges[[5, 6, 7, 8]]
+        self.lower_range = self.ranges[[0, 1, 2, 3]]
+        self.primary = self.ranges[[3, 5]]
+        self.upper_range_sum = sum(self.upper_range)
+        self.lower_range_sum = sum(self.lower_range)
+        self.primary_sum = sum(self.primary)
+
+    def estimate_position(self):
+        """For estimating position from velocity.
+
+        :param: None
+
+        :returns: None
+        """
+        self.x_position += self.vx
+        self.y_position += self.vy
+
+    def enter(self):
+        pass
+
+    def execute(self):
+        pass
+
+    def compute_errors(self, err_x, err_y):
+        """For computing the errors to update the velocity and acceleration using a P-D Controller.
+
+        :param err_x: x position error
+        :param err_y: y position error
+
+        :returns: None
+        """
+        # compute reference velocity
+        ref_vx = self.Kvx_p * err_x + self.Kvx_d * (err_x - self.err_x_prev)
+        ref_vy = self.Kvy_p * err_y + self.Kvy_d * (err_y - self.err_y_prev)
+
+        # compute velocity errors
+        err_vx = ref_vx - self.vx
+        err_vy = ref_vy - self.vy
+
+        # compute reference acceleration
+        ref_ax = self.Kax_p * err_vx + self.Kax_d * (err_vx - self.err_vx_prev)
+        ref_ay = self.Kay_p * err_vy + self.Kay_d * (err_vy - self.err_vy_prev)
+
+        # Store errors for D-Control
+        self.err_x_prev = err_x
+        self.err_y_prev = err_y
+        self.err_vx_prev = err_vx
+        self.err_vy_prev = err_vy
+
+        # Publish acceleration
+        self.send_acceleration(ref_ax, ref_ay)
+        self.publish_acceleration()
+
+    def set_velocity_gains(self, _Kvx_p, _Kvy_p, _Kvx_d, _Kvy_d):
+        """For Setting the gains of PD-controller for velocity.
+
+        :param _Kvx_p : proportional gain for x velocity
+        :param _Kvy_p: proportional gain for y velocity
+        :param _Kvx_d: derivative gain for x velocity
+        :param _Kvy_d: derivative gain for y velocity
+
+        :returns: None
+        """
+        self.Kvx_p, self.Kvy_p = _Kvx_p, _Kvy_p
+        self.Kvx_d, self.Kvy_d = _Kvx_d, _Kvy_d
+
+    def set_acceleration_gains(self, _Kax_p, _Kay_p, _Kax_d, _Kay_d):
+        """ For Setting the gains of PD-controller for acceleration.
+
+        :param _Kax_p : proportional gain for x acceleration
+        :param _Kay_p: proportional gain for y acceleration
+        :param _Kax_d: derivative gain for x acceleration
+        :param _Kay_d: derivative gain for y acceleration
+
+        :returns: None
+
+        """
+        self.Kax_p, self.Kay_p = _Kax_p, _Kay_p
+        self.Kax_d, self.Kay_d = _Kax_d, _Kay_d
+
+    def send_acceleration(self, _ax, _ay):
+        """For saving the computed acceleration
+
+        :param _ax: x - acceleration
+        :param  _ay: y - acceleration
+
+        :returns: None
+        """
+        self.acc = Vector3(_ax, _ay, 0)
+
+    def publish_acceleration(self):
+        """For publishing the computed acceleration to the /flappy_acc publisher
+
+        :param: None
+
+        :returns: None
+        """
+        self.pub_acc_cmd.publish(self.acc)
+
+    def exit(self):
+        pass
+
+
+class Go_Up(State):
+    """ For handling the go up state of flappy bird.
+    """
+
+    def __init__(self, FSM):
+        super(Go_Up, self).__init__(FSM)
+
+    def enter(self):
+        """For activating all the actions needed before executing this state.
+
+        :param: None
+
+        :returns: None
+        """
+        err_x = -self.primary_sum  # slow down
+        err_y = self.primary_sum + 0.05  # go up
+        self.set_velocity_gains(10, 7, 0.2, 0.3)
+        self.set_acceleration_gains(10, 5, 0.3, 0.4)
+        super(Go_Up, self).compute_errors(err_x, err_y)
+
+    def execute(self):
+        """For executing this state
+
+        :param: None
+
+        :returns: None
+        """
+        self.enter()
+        if self.ranges[3] < 0.24 or self.ranges[5] < 0.24:
+            if 0 > self.y_position:
+                self.FSM.to_transition("to_go_up")
+            if self.y_position < -18:
+                self.FSM.to_transition("to_go_up")
+            elif self.y_position > 18:
+                self.FSM.to_transition("to_go_down")
+        elif self.ranges[3] > 0.6 and self.ranges[4] > 0.6 and self.ranges[5] > 0.6:
+            self.FSM.to_transition("to_go_through")
         else:
-            proc_ranges.append(ranges[i])
+            self.FSM.to_transition("to_adjust")
 
-    return proc_ranges
+    def exit(self):
+        pass
 
-def eliminate_bubble(proc_ranges, dist, index):
-    """ Return the array of ranges after eliminating the points inside the bubble radius
+
+class Go_Down(State):
+    """ For handling the go down state of flappy bird.
     """
-    global bubble_radius
-    global increment
-    angle = bubble_radius/dist
-    start_idx = round(index - (angle/increment))
-    end_idx = round(index + (angle/increment))
 
-    if end_idx >= len(proc_ranges):
-        end_idx = len(proc_ranges)-1
+    def __init__(self, FSM):
+        super(Go_Down, self).__init__(FSM)
 
-    if start_idx < 0:
-        start_idx = 0
+    def enter(self):
+        """For activating all the actions needed before executing this state.
 
-    for i in range(int(start_idx), int(end_idx)+1):
-        proc_ranges[i] = 0
+        :param: None
 
-    return proc_ranges
+        :returns: None
+        """
+        err_x = -self.primary_sum  # slow down
+        err_y = -self.primary_sum + 0.05  # go down
+        self.set_velocity_gains(10, 7, 0.2, 0.3)
+        self.set_acceleration_gains(10, 5, 0.3, 0.4)
+        super(Go_Down, self).compute_errors(err_x, err_y)
 
-def find_max_gap(free_space_ranges):
-    """ Return the start index & end index of the max gap in free_space_ranges
+    def execute(self):
+        """For executing this state
+
+        :param: None
+
+        :returns: None
+        """
+        self.enter()
+        if self.ranges[3] < 0.24 or self.ranges[5] < 0.24:
+            if 0 < self.y_position:
+                self.FSM.to_transition("to_go_down")
+            if self.y_position < -18:
+                self.FSM.to_transition("to_go_up")
+            elif self.y_position > 18:
+                self.FSM.to_transition("to_go_down")
+        elif self.ranges[3] > 0.6 and self.ranges[4] > 0.6 and self.ranges[5] > 0.6:
+            self.FSM.to_transition("to_go_through")
+        else:
+            self.FSM.to_transition("to_adjust")
+
+    def exit(self):
+        pass
+
+
+class Go_Through(State):
+    """ For handling the go through state of flappy bird.
     """
-    max_start_idx = 0
-    max_size = 0
 
-    current_idx = 0
-    current_start = 0
+    def __init__(self, FSM):
+        super(Go_Through, self).__init__(FSM)
 
-    # print(free_spac10e_ranges)
+    def enter(self):
+        """For activating all the actions needed before executing this state.
 
-    while current_idx < len(free_space_ranges):
+        :param: None
 
-        current_size = 0
-        current_start = current_idx
+        :returns: None
+        """
+        err_x = self.primary_sum  # move forward
+        err_y = self.ranges[6] - self.ranges[2]  # regulate for symmetric duct entry
+        self.set_velocity_gains(2, 1, 0.1, 0.2)
+        self.set_acceleration_gains(30, 25, 2, 4)
+        super(Go_Through, self).compute_errors(err_x, err_y)
 
-        while current_idx < len(free_space_ranges) and free_space_ranges[current_idx] > gap_threshold:
-            current_size += 1
-            current_idx += 1
+    def execute(self):
+        """For executing this state
 
-        if current_size > max_size:
-            max_start_idx = current_start
-            max_size = current_size
-            current_size = 0
+       :param: None
 
-        current_idx += 1
+       :returns: None
+       """
+        self.enter()
+        if self.ranges[3] < 0.24 or self.ranges[5] < 0.24:
+            if 0 < self.y_position:
+                self.FSM.to_transition("to_go_down")
+            elif 0 > self.y_position:
+                self.FSM.to_transition("to_go_up")
+            if self.y_position < -18:
+                self.FSM.to_transition("to_go_up")
+            elif self.y_position > 18:
+                self.FSM.to_transition("to_go_down")
+        elif self.ranges[3] > 0.6 and self.ranges[4] > 0.6 and self.ranges[5] > 0.6:
+            self.FSM.to_transition("to_go_through")
+        else:
+            self.FSM.to_transition("to_adjust")
 
-    if current_size > max_size:
-        max_start_idx = current_start
-        max_size = current_size
+    def exit(self):
+        pass
 
-    return max_start_idx, max_start_idx+max_size-1
 
-def find_best_point(start_idx, end_idx, ranges):
-    """Start_i & end_i are start and end indicies of max-gap range, respectively
-    Return index of best point in ranges
+class Adjust(State):
+    """ For handling the adjust state of flappy bird.
     """
-    idx = (start_idx + end_idx)/2
-    print("Best Point:"+str(ranges[idx]))
-    return idx
-    
-def laserScanCallback(msg):
-    # msg has the format of sensor_msgs::LaserScan
-    # print laser angle and range85
-    # print("Laser range: {}, angle: {}".format(msg.ranges[0], msg.angle_min))
-    
-    global increment
-    global current_goal_steering_angle
-    global previous_goal_steering_angle
 
-    # Obtain the laser scans and preprocess them Find the closest point in the LIDAR ranges array
-    ranges = msg.ranges
-    
-    increment = np.rad2deg(msg.angle_increment)
-    # print("Ranges: "+str(msg.angle_increment))
+    def __init__(self, FSM):
+        super(Adjust, self).__init__(FSM)
 
-    proc_ranges = preprocess_lidar(ranges)
-    # print("Processed Ranges"+str(prclosest_pointoc_ranges))
+    def enter(self):
+        """For activating all the actions needed before executing this state.
 
-    #Find closest point to LiDAR
-    closest_point = min(proc_ranges)
-    # print("Closeset Point: "+str(closest_point))
-    closest_index = proc_ranges.index(closest_point)
+       :param: None
 
-    #Eliminate all points inside 'bubble' (set them to zero)
-    post_bubble = eliminate_bubble(proc_ranges, closest_point, closest_index)
-    # print("Post Bubble: "+str(post_bubble))
+       :returns: None
+       """
+        err_x = self.primary_sum  # move forward
+        err_y = (self.upper_range_sum - self.lower_range_sum)  # adjust via imbalance to find holes
+        self.set_velocity_gains(1, 0.5, 0.1, 0.2)
+        self.set_acceleration_gains(30, 25, 0.3, 2)
+        super(Adjust, self).compute_errors(err_x, err_y)
 
-    #Find max length gap
-    start_idx, end_idx = find_max_gap(post_bubble)
+    def execute(self):
+        """For executing this state
 
-    #Find the best point in the gap
-    final_idx = find_best_point(start_idx, end_idx, post_bubble)
-    # print("Best Point: "+str(final_idx))
+        :param: None
 
-    current_goal_steering_angle = (minimum_steering_angle + increment/2 )+ (final_idx *  increment)
+        :returns: None
+        """
+        self.enter()
+        if self.ranges[3] < 0.24 or self.ranges[5] < 0.24:
+            if 0 < self.y_position:
+                self.FSM.to_transition("to_go_down")
+            elif 0 > self.y_position:
+                self.FSM.to_transition("to_go_up")
+            if self.y_position < -18:
+                self.FSM.to_transition("to_go_up")
+            elif self.y_position > 18:
+                self.FSM.to_transition("to_go_down")
+        elif self.ranges[3] > 0.6 and self.ranges[4] > 0.6 and self.ranges[5] > 0.6:
+            self.FSM.to_transition("to_go_through")
+        else:
+            self.FSM.to_transition("to_adjust")
 
-    #Calculating the angle error 
-    steering_angle_error = round((current_goal_steering_angle + previous_goal_steering_angle)/2)
+    def exit(self):
+        pass
 
-    # Updating the goal coordinates using the theta error
-    free_space = [2*np.cos(np.deg2rad(steering_angle_error)) , 2*np.sin(np.deg2rad(steering_angle_error))]
 
-    previous_goal_steering_angle = np.rad2deg(np.arctan2(free_space[1],free_space[0]))
+##===================== FINITE STATE MACHINES =====================##
+class FSM(object):
+    """ This is the Finite State Machine of flappy bird.
+    """
+
+    def __init__(self, character):
+        self.character = character
+        self.states = {}
+        self.transitions = {}
+        self.current_state = None
+        self.previous_state = None
+        self.trans = None
+
+    def add_transition(self, transition_name, transition):
+        """For adding transition to the FSM
+
+        :param: transition_name: The name of the transition
+        :param: transition: The state to execute for the transition
+
+        :returns: None
+        """
+        self.transitions[transition_name] = transition
+
+    def add_state(self, state_name, state):
+        """For adding states to the FSM
+
+        :param: state_name: The name of the state
+        :param: state: The state to be executed
+
+        :returns: None
+        """
+        self.states[state_name] = state
+
+    def set_state(self, state_name):
+        """For assigning a default state to the FSM
+
+        :param: state_name: The name of the state
+
+        :returns: None
+        """
+        self.previous_state = self.current_state
+        self.current_state = self.states[state_name]
+
+    def to_transition(self, to_trans):
+        """For transitioning the FSM states
+
+        :param: to_trans: The name of the state to be transitioned
+
+        :returns: None
+        """
+        self.trans = self.transitions[to_trans]
+
+    def execute(self):
+        """For executing the FSM transitions
+
+        :param: None
+
+        :returns: None
+        """
+        if self.trans:
+            self.current_state.exit()
+            self.trans.execute()
+            self.set_state(self.trans.to_state)
+            self.current_state.enter()
+            self.trans = None
+        self.current_state.execute()
+
+
+##===================== IMPLEMENTATION =====================##
+Bird = type("Bird")
+
+
+class Flappy_Bird(Bird):
+    """ This is the flappy bird character that specifies the states and transitions.
+    """
+
+    def __init__(self):
+        self.FSM = FSM(self)
+
+        ## STATES
+        self.FSM.add_state("Go_Down", Go_Down(self.FSM))
+        self.FSM.add_state("Go_Through", Go_Through(self.FSM))
+        self.FSM.add_state("Adjust", Adjust(self.FSM))
+        self.FSM.add_state("Go_Up", Go_Up(self.FSM))
+
+        ## TRANSITIONS
+        self.FSM.add_transition("to_go_up", Transition("Go_Up"))
+        self.FSM.add_transition("to_go_down", Transition("Go_Down"))
+        self.FSM.add_transition("to_go_through", Transition("Go_Through"))
+        self.FSM.add_transition("to_adjust", Transition("Adjust"))
+
+        ## DEFAULT STATE
+        self.FSM.set_state("Adjust")
+
+    def execute(self):
+        self.FSM.execute()
+
+
+##===================== MAIN EXECUTION =====================##
 
 if __name__ == '__main__':
     try:
-        initNode()
+        rospy.init_node('flappy_automation_code', anonymous=True)
+        flappy_bird = Flappy_Bird()
+        while not rospy.is_shutdown():
+            flappy_bird.execute()
+        rospy.spin()
     except rospy.ROSInterruptException:
-        pass
+        print("An Error Occurred")
